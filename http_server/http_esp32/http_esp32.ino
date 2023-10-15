@@ -1,4 +1,3 @@
-
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
@@ -8,6 +7,10 @@
 #include <Time.h>
 #include <TimeLib.h>
 #include <LittleFS.h>
+
+#include <PxMatrix.h>
+#include "my_fonts/helvetica_11.h"
+#include "my_fonts/diamond_12.h"
 
 
 // Replace with your network credentials
@@ -21,14 +24,26 @@ WebServer server(80);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP);
 
-String date;
-String t;
+String cur_date;
+String cur_time;
 unsigned long epochTime;
 int tzOffset = +3;
 
 const char * days[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"} ;
 const char * months[] = {"Jan", "Feb", "Mar", "Apr", "May", "June", "July", "Aug", "Sep", "Oct", "Nov", "Dec"} ;
 const char * ampm[] = {"AM", "PM"}; 
+
+#define P_LAT 22
+#define P_A 19
+#define P_B 23
+#define P_C 18
+#define P_D 5
+#define P_E 15
+#define P_OE 2
+hw_timer_t * timer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
+PxMATRIX display(64,32,P_LAT, P_OE,P_A,P_B,P_C,P_D);
 
 void setupPins()
 {
@@ -153,29 +168,132 @@ void setupWeb()
   Serial.println("HTTP server started");
 }
 
+
+void IRAM_ATTR display_updater(){
+  // Increment the counter and set the time of ISR
+  portENTER_CRITICAL_ISR(&timerMux);
+  display.display(70);
+  //display.displayTestPattern(70);
+  portEXIT_CRITICAL_ISR(&timerMux);
+}
+
+
+
+uint16_t myCYAN = display.color565(0, 255, 255);
+uint16_t myRED = display.color565(255, 0, 0);
+
+void setupDisplay() 
+{
+  display.begin(8);
+  
+  display.setPanelsWidth(2);
+
+  display.clearDisplay();
+  display.flushDisplay();
+  
+  display.setTextColor(myCYAN);
+  display.setCursor(2,0);
+  display.print("Pixel");
+
+  timer = timerBegin(0, 80, true);
+  timerAttachInterrupt(timer, &display_updater, true);
+  timerAlarmWrite(timer, 4000, true);
+  timerAlarmEnable(timer);
+
+  Serial.println("initialized display");
+
+
+  //delay(1000);
+}
+
 void setup(void)
 {
   setupPins();
   setupSerial();
   setupFs();
+  
   connectWifi();
-
   setupNtp();
   setupWeb();
+
+  setupDisplay();
 }
 
-void updateTime()
+bool updateTime()
 {
   if (WiFi.status() != WL_CONNECTED)
-    return;
+    return false;
   timeClient.update();
-  epochTime =  timeClient.getEpochTime();    
+  unsigned long prevEpochTime = epochTime;
+  epochTime =  timeClient.getEpochTime();
+  return (epochTime != prevEpochTime);
+}
+
+
+void timeToStrings()
+{
+      // convert received time stamp to time_t object
+    time_t local, utc;
+    utc = epochTime;
+    local = utc + tzOffset * 3600;
+
+    cur_date = "";  // clear the variables
+    cur_time = "";
+
+    // now format the Time variables into strings with proper names for month, day etc
+    cur_date += days[weekday(local)-1];
+    cur_date += ", ";
+    cur_date += months[month(local)-1];
+    cur_date += " ";
+    cur_date += day(local);
+    cur_date += ", ";
+    cur_date += year(local);
+
+    // format the time to 12-hour format with AM/PM and no seconds
+    cur_time += hourFormat12(local);
+    cur_time += ":";
+    int mn = minute(local);
+    if(mn < 10)  // add a zero if minute is under 10
+      cur_time += "0";
+    cur_time += mn;
+    cur_time += ":";
+    int sec = second(local);
+    if(sec < 10)  // add a zero if minute is under 10
+      cur_time += "0";
+    cur_time += sec;
+
+    cur_time += " ";
+    cur_time += ampm[isPM(local)];
+}
+
+
+void printTime()
+{
+  display.clearDisplay();
+
+  timeToStrings();
+
+  display.setFont(&DiamondRegularRNormal12);
+  display.setTextColor(myCYAN);
+  display.setCursor(2,2);
+  display.print(cur_time);
+
+  display.setFont(&HelveticaRegularRNormal11);
+  display.setTextColor(myRED);
+  display.setCursor(2,16);
+  display.print(cur_date);
 }
 
 void loop(void){
   // MDNS.update(); not needed?
+  
   server.handleClient();
-  updateTime();
+  bool timeChanged = updateTime();
+  
+  if (timeChanged)
+  {
+    printTime();
+  }
 
   /*
   digitalWrite(LED_BUILTIN, LOW);  
@@ -184,8 +302,6 @@ void loop(void){
   delay(500);
   */
 }
-
-
 
 void handle_led() 
 {
@@ -199,46 +315,8 @@ void handle_led()
 
 void handle_getTime()
 {
-    // convert received time stamp to time_t object
-    time_t local, utc;
-    utc = epochTime;
+    timeToStrings();
 
-
-    local = utc + tzOffset * 3600;
-
-    date = "";  // clear the variables
-    t = "";
-/*
-    t += utc;
-    t += "\n";
-    t += local;
-    t += "\n";
-  */  
-    // now format the Time variables into strings with proper names for month, day etc
-    date += days[weekday(local)-1];
-    date += ", ";
-    date += months[month(local)-1];
-    date += " ";
-    date += day(local);
-    date += ", ";
-    date += year(local);
-
-    // format the time to 12-hour format with AM/PM and no seconds
-    t += hourFormat12(local);
-    t += ":";
-    int mn = minute(local);
-    if(mn < 10)  // add a zero if minute is under 10
-      t += "0";
-    t += mn;
-    t += ":";
-    int sec = second(local);
-    if(sec < 10)  // add a zero if minute is under 10
-      t += "0";
-    t += sec;
-
-    t += " ";
-    t += ampm[isPM(local)];
-
-    server.send(200, "text/plain", t + "\n" + date);
+    server.send(200, "text/plain", cur_time + "\n" + cur_date);
 
 }
